@@ -1,16 +1,31 @@
+"""
+FormFriend 🤝 - AI application-form guide
 
-import os
+Upload (or photograph) a form and FormFriend explains it in simple
+English, Tamil or Hindi. Groq is tried first, Gemini is the backup.
+
+Run with:   streamlit run app.py
+"""
+
 import base64
-import streamlit as st
+import hashlib
+import io
+import json
+import os
+import re
+from html import escape
 
+import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from groq import Groq
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat
 
 
 # ==========================================
-# 1. LOAD API KEYS
+# 1. SETTINGS
 # ==========================================
 
 load_dotenv()
@@ -18,65 +33,31 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+# Model names can be changed in your .env file without touching the code:
+#   GROQ_MODEL=...   (must be a VISION model on Groq)
+#   GEMINI_MODEL=...
+GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
-# ==========================================
-# 2. PAGE CONFIGURATION
-# ==========================================
+MAX_IMAGES = 5          # Groq accepts a limited number of images per request
+MAX_IMAGE_SIDE = 1600   # pixels - bigger photos are shrunk before sending
+REQUEST_TIMEOUT = 60    # seconds to wait for one AI call
+RETRIES = 1             # extra tries on the same API before switching
+BLUR_THRESHOLD = 100    # lower = more sensitive blur warning (rough check)
 
-st.set_page_config(
-    page_title="FormFriend",
-    page_icon="🤝",
-    layout="centered"
-)
-
-st.title("FormFriend 🤝")
-st.subheader("Your AI Application Guide")
-
-st.write(
-    "Upload a form and let AI explain it in simple language."
-)
-
-
-# ==========================================
-# 3. UPLOAD SECTION
-# ==========================================
-
-st.subheader("📄 Upload Your Application Form")
-
-st.write(
-    "Choose a photo of your form from your phone or computer."
-)
-
-st.info(
-    "📱 Mobile users: Tap the image upload option and select "
-    "your form photo from Gallery, Photos, or your phone's picker."
-)
-
-# Select photo from gallery or files
-gallery_file = st.file_uploader(
-    "🖼️ Choose a photo from Gallery / Photos",
-    type=["jpg", "jpeg", "png"],
-    help="Select an existing photo of your application form."
-)
-
-# Take a photo directly using camera
-camera_file = st.camera_input(
-    "📷 Take a photo of your form"
-)
-
-# Choose whichever image the user provided
-uploaded_file = (
-    gallery_file
-    if gallery_file is not None
-    else camera_file
-)
+# language name -> browser speech code (used for "Read aloud")
+LANGUAGES = {
+    "English": "en-IN",
+    "Tamil": "ta-IN",
+    "Hindi": "hi-IN",
+}
 
 
 # ==========================================
-# 4. FOR MFRIEND AI - SYSTEM PROMPT
+# 2. SYSTEM PROMPT
 # ==========================================
 
-prompt = """
+SYSTEM_PROMPT = """
 # SYSTEM IDENTITY: FORMFriend AI
 
 You are FormFriend, an advanced, intelligent,
@@ -136,6 +117,9 @@ If image quality is poor, ask the user to upload
 a clearer image.
 
 Never pretend to read information that is not visible.
+
+If several images are attached, treat them as consecutive
+pages of the same form.
 
 
 ## 3. INTELLIGENT FORM EXPLANATION
@@ -407,151 +391,622 @@ Every response must help the user understand what to do next.
 
 You are FormFriend.
 Your purpose is to turn confusion into clarity.
+
+
+## 14. APP DISPLAY RULES
+
+The app shows your full analysis in tabs, one tab per
+main section.
+
+- Use a single "#" ONLY for the main section headings
+  from the response format above.
+- Inside a section, use "##", "###", bullet points or
+  numbered lists, never a single "#".
+- Translate the main section headings into the selected
+  language.
+- For follow-up questions from the user, answer directly
+  and briefly. Do not repeat the whole analysis.
+"""
+
+
+def build_system_prompt(language):
+    """System prompt + the language chosen in the sidebar."""
+    return SYSTEM_PROMPT + f"""
+
+## 15. SESSION LANGUAGE
+
+The user selected **{language}** in the app.
+Write your entire answer in {language}, and keep the official
+field names (in their original language) next to the translated
+meaning.
 """
 
 
 # ==========================================
-# 5. AI ANALYSIS
+# 3. IMAGE HELPERS
 # ==========================================
 
-if uploaded_file is not None:
+@st.cache_data(show_spinner=False)
+def prepare_image(raw_bytes):
+    """Fix phone rotation, shrink big photos and return JPEG bytes."""
+    img = Image.open(io.BytesIO(raw_bytes))
+    img = ImageOps.exif_transpose(img)
+    img = img.convert("RGB")
+    img.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE))
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=85)
+    return buffer.getvalue()
 
-    st.image(
-        uploaded_file,
-        caption="Uploaded Application Form",
-        use_container_width=True
+
+def quality_warnings(img_bytes):
+    """Very rough check for low-resolution or blurry photos."""
+    warnings = []
+    img = Image.open(io.BytesIO(img_bytes)).convert("L")
+
+    if min(img.size) < 600:
+        warnings.append(
+            "The image resolution is low. Text may be hard to read."
+        )
+
+    small = img.copy()
+    small.thumbnail((800, 800))
+    sharpness = ImageStat.Stat(small.filter(ImageFilter.FIND_EDGES)).var[0]
+    if sharpness < BLUR_THRESHOLD:
+        warnings.append(
+            "This photo looks blurry. A clearer, well-lit photo "
+            "will give better results."
+        )
+    return warnings
+
+
+@st.cache_data(show_spinner=False)
+def make_sample_form():
+    """Draw a dummy application form so people can try the app."""
+    img = Image.new("RGB", (900, 1300), "white")
+    draw = ImageDraw.Draw(img)
+
+    try:
+        title_font = ImageFont.load_default(size=40)
+        font = ImageFont.load_default(size=28)
+    except TypeError:  # older Pillow versions
+        title_font = font = ImageFont.load_default()
+
+    draw.text((60, 50), "SAMPLE APPLICATION FORM", fill="black", font=title_font)
+    draw.text((60, 110), "(Dummy form for demo only)", fill="gray", font=font)
+
+    fields = [
+        "1. Full Name (as per ID proof)",
+        "2. Father's / Mother's Name",
+        "3. Date of Birth (DD/MM/YYYY)",
+        "4. Gender:  [ ] Male   [ ] Female   [ ] Other",
+        "5. Residential Address",
+        "6. Mobile Number",
+        "7. Annual Family Income",
+        "8. Category:  [ ] General  [ ] OBC  [ ] SC  [ ] ST",
+    ]
+
+    y = 200
+    for field in fields:
+        draw.text((60, y), field, fill="black", font=font)
+        draw.rectangle((60, y + 40, 840, y + 90), outline="black", width=2)
+        y += 120
+
+    draw.text(
+        (60, y + 10),
+        "Attach: ID proof, address proof, photograph",
+        fill="black",
+        font=font,
     )
 
-    if st.button("Understand My Form", type="primary"):
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
 
-        image_bytes = uploaded_file.getvalue()
-        mime_type = uploaded_file.type
 
-        # ----------------------------------
-        # PRIMARY API: GROQ
-        # ----------------------------------
+def show_image(img_bytes, caption):
+    """st.image with a fallback for different Streamlit versions."""
+    try:
+        st.image(img_bytes, caption=caption, width="stretch")
+    except Exception:
+        st.image(img_bytes, caption=caption, use_container_width=True)
 
-        try:
 
-            if not GROQ_API_KEY:
-                raise Exception("Groq API key is missing.")
+# ==========================================
+# 4. AI HELPERS (Groq first, Gemini backup)
+# ==========================================
 
-            with st.spinner(
-                "Analysing your document using FormFriend AI..."
-            ):
+class AIError(Exception):
+    """Raised when every API attempt failed."""
 
-                groq_client = Groq(
-                    api_key=GROQ_API_KEY
+    def __init__(self, errors):
+        super().__init__("; ".join(errors))
+        self.errors = errors
+
+
+def call_groq(system_prompt, history, images):
+    client = Groq(
+        api_key=GROQ_API_KEY,
+        timeout=REQUEST_TIMEOUT,
+        max_retries=0,
+    )
+
+    messages = [{"role": "system", "content": system_prompt}]
+
+    for index, message in enumerate(history):
+        # The form images travel with the very first user message.
+        if index == 0 and images and message["role"] == "user":
+            content = [{"type": "text", "text": message["content"]}]
+            for img in images:
+                b64 = base64.b64encode(img).decode("utf-8")
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                    }
                 )
-
-                image_base64 = base64.b64encode(
-                    image_bytes
-                ).decode("utf-8")
-
-                groq_response = (
-                    groq_client.chat.completions.create(
-                        model="qwen/qwen3.8-27b",
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": prompt
-                                    },
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": (
-                                                f"data:{mime_type};"
-                                                f"base64,{image_base64}"
-                                            )
-                                        }
-                                    }
-                                ]
-                            }
-                        ]
-                    )
-                )
-
-                result = (
-                    groq_response.choices[0]
-                    .message.content
-                )
-
-                if not result:
-                    raise Exception(
-                        "Groq returned an empty response."
-                    )
-
-            st.success("Analysis completed.....!!")
-
-            st.markdown(result)
-
-        # ----------------------------------
-        # BACKUP API: GOOGLE GEMINI
-        # ----------------------------------
-
-        except Exception as groq_error:
-
-            st.warning(
-                "This may take some time please wait at a movement...."
+            messages.append({"role": "user", "content": content})
+        else:
+            messages.append(
+                {"role": message["role"], "content": message["content"]}
             )
 
+    response = client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=messages,
+    )
+    return response.choices[0].message.content
+
+
+def call_gemini(system_prompt, history, images):
+    client = genai.Client(
+        api_key=GEMINI_API_KEY,
+        http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT * 1000),
+    )
+
+    contents = []
+    for index, message in enumerate(history):
+        role = "model" if message["role"] == "assistant" else "user"
+        parts = [types.Part.from_text(text=message["content"])]
+
+        if index == 0 and images and role == "user":
+            for img in images:
+                parts.append(
+                    types.Part.from_bytes(data=img, mime_type="image/jpeg")
+                )
+
+        contents.append(types.Content(role=role, parts=parts))
+
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=contents,
+        config=types.GenerateContentConfig(system_instruction=system_prompt),
+    )
+    return response.text
+
+
+def ask_ai(system_prompt, history, images=None):
+    """
+    Try Groq, then Gemini. Each gets 1 + RETRIES attempts.
+    Returns (text, provider_name). Raises AIError if everything fails.
+    """
+    providers = []
+    if GROQ_API_KEY:
+        providers.append(("Groq", call_groq))
+    if GEMINI_API_KEY:
+        providers.append(("Gemini", call_gemini))
+
+    if not providers:
+        raise AIError(["No API keys found. Add them to your .env file."])
+
+    errors = []
+    for name, function in providers:
+        for attempt in range(1, RETRIES + 2):
             try:
+                text = function(system_prompt, history, images or [])
+                # some reasoning models add <think>...</think> blocks
+                text = re.sub(
+                    r"<think>.*?</think>", "", text or "", flags=re.DOTALL
+                ).strip()
+                if not text:
+                    raise RuntimeError("Empty response.")
+                return text, name
+            except Exception as error:
+                errors.append(f"{name} (attempt {attempt}): {error}")
 
-                if not GEMINI_API_KEY:
-                    raise Exception("Gemini API key is missing.")
+    raise AIError(errors)
 
-                with st.spinner(
-                    "Reanalysing your document"
-                ):
 
-                    gemini_client = genai.Client(
-                        api_key=GEMINI_API_KEY
-                    )
+def extract_documents(analysis_text, language):
+    """Second small AI call: pull a document list out for the checklist."""
+    system = (
+        "You extract data. Reply with ONLY a JSON array of short strings. "
+        "No explanation and no markdown fences."
+    )
+    history = [
+        {
+            "role": "user",
+            "content": (
+                "From the explanation below, list the supporting documents "
+                "the applicant must keep ready. Use short names written in "
+                f"{language}. If none are mentioned, return [].\n\n"
+                f"{analysis_text}"
+            ),
+        }
+    ]
+    try:
+        text, _ = ask_ai(system, history)
+        match = re.search(r"\[.*\]", text, re.DOTALL)
+        documents = json.loads(match.group(0))
+        return [str(doc).strip() for doc in documents if str(doc).strip()][:15]
+    except Exception:
+        return []  # checklist is a bonus, never block the main result
 
-                    response = (
-                        gemini_client.models.generate_content(
-                            model="gemini-3.8-flash",
-                            contents=[
-                                prompt,
-                                types.Part.from_bytes(
-                                    data=image_bytes,
-                                    mime_type=mime_type
-                                )
-                            ]
-                        )
-                    )
 
-                    result = response.text
+# ==========================================
+# 5. DISPLAY HELPERS
+# ==========================================
 
-                    if not result:
-                        raise Exception(
-                            "Gemini returned an empty response."
-                        )
+def split_sections(markdown_text):
+    """Split the answer at top-level '# ' headings."""
+    parts = re.split(r"(?m)^# +(.+)$", markdown_text)
+    preamble = parts[0].strip()
+    sections = [
+        (parts[i].strip(), parts[i + 1].strip())
+        for i in range(1, len(parts) - 1, 2)
+    ]
+    return preamble, sections
 
-                st.success(
-                    "Analysis completed"
+
+def render_result(markdown_text):
+    """Show the answer in tabs when it has several main sections."""
+    preamble, sections = split_sections(markdown_text)
+
+    if len(sections) < 2:
+        st.markdown(markdown_text)
+        return
+
+    if preamble:
+        st.markdown(preamble)
+
+    tabs = st.tabs([title[:28] for title, _ in sections])
+    for tab, (title, body) in zip(tabs, sections):
+        with tab:
+            st.markdown(f"### {title}")
+            st.markdown(body)
+
+
+def read_aloud(text, lang_code):
+    """Browser text-to-speech (no extra library). Works best in Chrome."""
+    clean = re.sub(r"[#*_`>|]", " ", text)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    safe_text = json.dumps(clean).replace("</", "<\\/")
+
+    widget = """
+    <div style="font-family: sans-serif;">
+      <button id="play" style="padding:8px 14px;margin-right:8px;">
+        🔊 Read aloud
+      </button>
+      <button id="stop" style="padding:8px 14px;">⏹ Stop</button>
+    </div>
+    <script>
+      const text = __TEXT__;
+      const lang = __LANG__;
+      const chunks = text.match(/[^.!?।]+[.!?।]*/g) || [text];
+
+      document.getElementById("play").onclick = () => {
+        window.speechSynthesis.cancel();
+        chunks.forEach((chunk) => {
+          const u = new SpeechSynthesisUtterance(chunk.trim());
+          u.lang = lang;
+          u.rate = 0.95;
+          window.speechSynthesis.speak(u);
+        });
+      };
+      document.getElementById("stop").onclick = () => {
+        window.speechSynthesis.cancel();
+      };
+    </script>
+    """
+    widget = widget.replace("__TEXT__", safe_text).replace(
+        "__LANG__", json.dumps(lang_code)
+    )
+    components.html(widget, height=60)
+
+
+def build_download_html(markdown_text):
+    """Printable HTML page (open it, then Print -> Save as PDF)."""
+    try:
+        import markdown  # optional package
+
+        body = markdown.markdown(markdown_text, extensions=["tables"])
+    except Exception:
+        body = (
+            "<pre style='white-space:pre-wrap'>"
+            f"{escape(markdown_text)}</pre>"
+        )
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>FormFriend Guide</title>
+<style>
+  body {{
+    font-family: Arial, 'Noto Sans Tamil', 'Noto Sans Devanagari', sans-serif;
+    max-width: 800px; margin: auto; padding: 24px; line-height: 1.6;
+  }}
+  h1, h2 {{ color: #1a4d8f; }}
+  table {{ border-collapse: collapse; }}
+  td, th {{ border: 1px solid #ccc; padding: 6px; }}
+</style>
+</head>
+<body>
+{body}
+<hr>
+<p><small>Generated by FormFriend. Please verify details on the
+official website.</small></p>
+</body>
+</html>"""
+
+
+def show_errors(errors, debug):
+    st.error(
+        "😕 Can't read your document at the moment. "
+        "Please try again in a little while."
+    )
+    if debug:
+        with st.expander("Technical error details"):
+            for line in errors:
+                st.code(line)
+
+
+# ==========================================
+# 6. PAGE SETUP + SESSION STATE
+# ==========================================
+
+st.set_page_config(
+    page_title="FormFriend",
+    page_icon="🤝",
+    layout="centered",
+)
+
+ss = st.session_state
+
+DEFAULT_STATE = {
+    "result": None,           # the main analysis text
+    "result_language": "English",
+    "provider": None,         # which AI answered
+    "history": [],            # whole conversation (for follow-ups)
+    "analysis_images": [],    # images the analysis was based on
+    "fingerprint": None,      # id of those images
+    "docs": [],               # checklist items
+    "use_sample": False,
+    "uploader_version": 0,    # changing this clears the upload widgets
+}
+for key, value in DEFAULT_STATE.items():
+    ss.setdefault(key, value)
+
+
+def reset_all():
+    version = ss.get("uploader_version", 0) + 1
+    for key in list(ss.keys()):
+        del ss[key]
+    ss["uploader_version"] = version
+
+
+# ==========================================
+# 7. SIDEBAR
+# ==========================================
+
+with st.sidebar:
+    st.header("⚙️ Settings")
+    language = st.selectbox("🌐 Language", list(LANGUAGES))
+    debug = st.checkbox("🛠️ Debug mode", help="Shows technical error details.")
+    st.button("🔄 Start over", on_click=reset_all)
+
+    st.divider()
+    st.subheader("How to use")
+    st.markdown(
+        "1. Upload a clear photo of your form\n"
+        "2. Pick your language\n"
+        "3. Click **Understand My Form**\n"
+        "4. Read, listen, tick your documents\n"
+        "5. Ask follow-up questions below the answer"
+    )
+
+
+# ==========================================
+# 8. HEADER + UPLOAD SECTION
+# ==========================================
+
+st.title("FormFriend 🤝")
+st.subheader("Your AI Application Guide")
+st.write("Upload a form and let AI explain it in simple language.")
+
+st.info(
+    "🔒 Privacy tip: only upload what is needed. Avoid photos that show "
+    "Aadhaar numbers, bank details or passwords."
+)
+
+st.subheader("📄 Upload Your Application Form")
+st.write(
+    f"Choose up to {MAX_IMAGES} photos (one per page) from your phone "
+    "or computer."
+)
+
+gallery_files = st.file_uploader(
+    "🖼️ Choose photo(s) from Gallery / Photos",
+    type=["jpg", "jpeg", "png"],
+    accept_multiple_files=True,
+    key=f"gallery_{ss.uploader_version}",
+    help="Select existing photos of your application form.",
+)
+
+camera_file = None
+if st.checkbox("📷 Take a photo with the camera", key=f"cam_{ss.uploader_version}"):
+    camera_file = st.camera_input(
+        "Take a photo of your form",
+        key=f"camera_{ss.uploader_version}",
+    )
+
+if st.button("🧪 Try with a sample form"):
+    ss.use_sample = True
+
+# Collect the images
+raw_images = [f.getvalue() for f in (gallery_files or [])]
+if camera_file is not None:
+    raw_images.append(camera_file.getvalue())
+
+using_sample = False
+if not raw_images and ss.use_sample:
+    raw_images = [make_sample_form()]
+    using_sample = True
+
+if len(raw_images) > MAX_IMAGES:
+    st.warning(f"Only the first {MAX_IMAGES} images will be used.")
+    raw_images = raw_images[:MAX_IMAGES]
+
+images = []
+for raw in raw_images:
+    try:
+        images.append(prepare_image(raw))
+    except Exception:
+        st.warning("One of the files could not be read as an image.")
+
+current_fingerprint = (
+    hashlib.md5(b"".join(images)).hexdigest() if images else None
+)
+
+
+# ==========================================
+# 9. PREVIEW + ANALYSE
+# ==========================================
+
+if images:
+    if using_sample:
+        st.caption("Showing a dummy sample form 🧪")
+
+    columns = st.columns(min(len(images), 3))
+    for index, img in enumerate(images):
+        with columns[index % len(columns)]:
+            show_image(img, f"Page {index + 1}")
+        for warning in quality_warnings(img):
+            st.warning(f"Page {index + 1}: {warning}")
+
+    if st.button("✨ Understand My Form", type="primary"):
+        request = (
+            f"Please analyse the attached form ({len(images)} image(s)) "
+            f"and explain it in {language}, following your response format."
+        )
+        first_message = [{"role": "user", "content": request}]
+
+        try:
+            with st.spinner("Analysing your form with FormFriend AI... ⏳"):
+                text, provider = ask_ai(
+                    build_system_prompt(language), first_message, images
                 )
+                docs = extract_documents(text, language)
 
-                st.markdown(result)
+            ss.history = first_message + [
+                {"role": "assistant", "content": text}
+            ]
+            ss.result = text
+            ss.result_language = language
+            ss.provider = provider
+            ss.analysis_images = images
+            ss.fingerprint = current_fingerprint
+            ss.docs = docs
 
-            # ----------------------------------
-            # BOTH APIs FAILED
-            # ----------------------------------
+        except AIError as error:
+            show_errors(error.errors, debug)
 
-            except Exception as gemini_error:
 
-                st.error(
-                    "Cant read your document at a movement "
-                    "Please try again later."
+# ==========================================
+# 10. RESULT, TOOLS AND FOLLOW-UP CHAT
+# ==========================================
+
+if ss.result:
+    st.divider()
+
+    if current_fingerprint and current_fingerprint != ss.fingerprint:
+        st.info(
+            "You changed the images. Click **Understand My Form** "
+            "to analyse the new ones."
+        )
+
+    st.success("Analysis completed! ✅")
+    st.caption(f"Answered by {ss.provider}")
+
+    render_result(ss.result)
+
+    # ---- Listen + download ----
+    st.subheader("🔊 Listen or save")
+    read_aloud(ss.result, LANGUAGES.get(ss.result_language, "en-IN"))
+    st.caption(
+        "Voice uses your browser. Tamil and Hindi voices depend on "
+        "your device."
+    )
+
+    left, right = st.columns(2)
+    with left:
+        st.download_button(
+            "⬇️ Download (.md)",
+            data=ss.result,
+            file_name="formfriend_guide.md",
+            mime="text/markdown",
+        )
+    with right:
+        st.download_button(
+            "🖨️ Printable page (save as PDF)",
+            data=build_download_html(ss.result),
+            file_name="formfriend_guide.html",
+            mime="text/html",
+        )
+
+    # ---- Document checklist ----
+    if ss.docs:
+        st.subheader("✅ My document checklist")
+        ready = 0
+        for index, doc in enumerate(ss.docs):
+            if st.checkbox(doc, key=f"doc_{ss.fingerprint}_{index}"):
+                ready += 1
+        st.progress(ready / len(ss.docs), text=f"{ready} of {len(ss.docs)} ready")
+        st.caption(
+            "This list is made by AI from your form. Please confirm it "
+            "against the official instructions."
+        )
+
+    # ---- Follow-up chat ----
+    st.subheader("💬 Ask a follow-up question")
+    for message in ss.history[2:]:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    question = st.chat_input("Ask anything about this form...")
+    if question:
+        ss.history.append({"role": "user", "content": question})
+        try:
+            with st.spinner("Thinking... 🤔"):
+                answer, provider = ask_ai(
+                    build_system_prompt(language),
+                    ss.history,
+                    ss.analysis_images,
                 )
+            ss.history.append({"role": "assistant", "content": answer})
+            ss.provider = provider
+        except AIError as error:
+            ss.history.pop()  # remove the question that got no answer
+            show_errors(error.errors, debug)
+        else:
+            st.rerun()
 
-                with st.expander("Technical error details"):
 
-                    st.write("Groq API error:")
-                    st.code(str(groq_error))
+# ==========================================
+# 11. FOOTER
+# ==========================================
 
-                    st.write("Gemini API error:")
-                    st.code(str(gemini_error))
+st.divider()
+st.caption(
+    "FormFriend gives general guidance. Always check the official "
+    "website or office before you submit a form."
+)
