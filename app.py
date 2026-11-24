@@ -846,53 +846,42 @@ st.set_page_config(
     page_icon="🤝",
     layout="centered",
 )
-    
 # ==========================================
-# MODERN PASTEL PINK UI THEME
+# FOR MFRIEND AI - NAVY BLUE & PASTEL PINK
 # ==========================================
 
 st.markdown("""
 <style>
 
-/* Import modern font */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
-/* Main application */
+/* MAIN BACKGROUND */
 .stApp {
-    background: linear-gradient(135deg, #FFF1F5 0%, #FDF7FF 55%, #F5F3FF 100%);
+    background: #FFF1F5;
     color: #172554;
     font-family: 'Inter', sans-serif;
 }
 
-/* Main content width */
 .block-container {
     max-width: 1100px;
-    padding-top: 2.5rem;
+    padding-top: 2rem;
     padding-bottom: 3rem;
 }
 
-/* Main title */
-h1 {
+/* HEADINGS */
+h1, h2, h3 {
     color: #172554 !important;
-    font-weight: 800 !important;
-    letter-spacing: -1.5px;
-}
-
-/* Headings */
-h2, h3 {
-    color: #26345C !important;
     font-weight: 700 !important;
 }
 
-/* Paragraphs */
 p, label, li {
     color: #475569;
 }
 
-/* Sidebar */
+/* SIDEBAR */
 [data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #F8C8DC 0%, #FCE7F3 100%);
-    border-right: 1px solid #F3B6D0;
+    background: #F8C8DC;
+    border-right: 1px solid #F4C6D9;
 }
 
 [data-testid="stSidebar"] h1,
@@ -901,50 +890,73 @@ p, label, li {
     color: #172554 !important;
 }
 
-/* Buttons */
+/* NAVY BLUE BUTTONS */
 .stButton > button,
 .stDownloadButton > button {
-    background: linear-gradient(135deg, #2563EB, #7C3AED, #EC8FB5);
-    color: white !important;
-    border: none;
-    border-radius: 14px;
-    padding: 0.65rem 1.3rem;
-    font-weight: 700;
-    transition: all 0.25s ease;
-    box-shadow: 0 5px 15px rgba(124, 58, 237, 0.15);
+    background: #172554 !important;
+    color: #FFFFFF !important;
+    border: 1px solid #172554 !important;
+    border-radius: 12px !important;
+    padding: 0.65rem 1.3rem !important;
+    font-weight: 600 !important;
+    transition: all 0.25s ease !important;
+    box-shadow: 0 4px 10px rgba(23, 37, 84, 0.15);
 }
 
+/* BUTTON HOVER */
 .stButton > button:hover,
 .stDownloadButton > button:hover {
+    background: #1E3A8A !important;
+    border-color: #1E3A8A !important;
     transform: translateY(-2px);
-    box-shadow: 0 8px 20px rgba(124, 58, 237, 0.25);
-    border: none;
+    box-shadow: 0 6px 15px rgba(23, 37, 84, 0.22);
 }
 
-/* File uploader */
+/* BUTTON CLICK */
+.stButton > button:active,
+.stDownloadButton > button:active {
+    transform: scale(0.98);
+}
+
+/* DISABLED BUTTON */
+.stButton > button:disabled,
+.stDownloadButton > button:disabled {
+    background: #94A3B8 !important;
+    border-color: #94A3B8 !important;
+    color: #FFFFFF !important;
+    box-shadow: none;
+}
+
+/* FILE UPLOADER */
 [data-testid="stFileUploader"] {
-    background: rgba(255, 255, 255, 0.85);
+    background: #FFFFFF;
     border: 2px dashed #EC8FB5;
-    border-radius: 20px;
-    padding: 18px;
-}
-
-/* Cards and containers */
-[data-testid="stVerticalBlockBorderWrapper"] {
-    background: rgba(255, 255, 255, 0.8);
-    border: 1px solid #F4C6D9;
     border-radius: 18px;
+    padding: 15px;
 }
 
-/* Input fields */
+/* INPUT FIELDS */
 .stTextInput input,
-.stTextArea textarea,
-.stSelectbox div[data-baseweb="select"] {
-    border-radius: 12px !important;
-    border-color: #E9AFC8 !important;
+.stTextArea textarea {
+    background: #FFFFFF !important;
+    border: 1px solid #E9AFC8 !important;
+    border-radius: 10px !important;
+    color: #172554 !important;
 }
 
-/* Tabs */
+/* SELECT BOX */
+.stSelectbox div[data-baseweb="select"] {
+    border-radius: 10px !important;
+}
+
+/* CARDS */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    background: #FFFFFF;
+    border: 1px solid #F4C6D9;
+    border-radius: 16px;
+}
+
+/* TABS */
 .stTabs [data-baseweb="tab-list"] {
     gap: 8px;
     border-bottom: 2px solid #F4C6D9;
@@ -954,61 +966,55 @@ p, label, li {
     background: #FCE7F3;
     border-radius: 10px 10px 0 0;
     padding: 10px 16px;
-    color: #475569;
+    color: #172554;
     font-weight: 600;
 }
 
 .stTabs [aria-selected="true"] {
-    background: #EC8FB5 !important;
-    color: white !important;
+    background: #172554 !important;
+    color: #FFFFFF !important;
 }
 
-/* Alerts */
+/* ALERTS */
 [data-testid="stAlert"] {
+    border-radius: 12px;
+}
+
+/* PROGRESS BAR */
+.stProgress > div > div > div > div {
+    background: #172554;
+}
+
+/* CHAT MESSAGES */
+[data-testid="stChatMessage"] {
+    background: #FFFFFF;
+    border: 1px solid #F4C6D9;
+    border-radius: 14px;
+    padding: 12px;
+}
+
+/* CHAT INPUT */
+[data-testid="stChatInput"] {
+    border-radius: 12px;
+}
+
+/* IMAGES */
+[data-testid="stImage"] img {
     border-radius: 14px;
     border: 1px solid #F4C6D9;
 }
 
-/* Progress bar */
-.stProgress > div > div > div > div {
-    background: linear-gradient(90deg, #2563EB, #7C3AED, #EC8FB5);
-}
-
-/* Images */
-[data-testid="stImage"] img {
-    border-radius: 16px;
-    border: 2px solid #F4C6D9;
-}
-
-/* Checkboxes */
-[data-testid="stCheckbox"] {
-    padding: 5px;
-}
-
-/* Chat messages */
-[data-testid="stChatMessage"] {
-    background: rgba(255, 255, 255, 0.85);
-    border: 1px solid #F4C6D9;
-    border-radius: 16px;
-    padding: 12px;
-}
-
-/* Chat input */
-[data-testid="stChatInput"] {
-    border-radius: 16px;
-}
-
-/* Divider */
+/* DIVIDER */
 hr {
     border-color: #F4C6D9 !important;
 }
 
-/* Footer */
+/* CAPTIONS */
 [data-testid="stCaptionContainer"] {
     color: #64748B;
 }
 
-/* Mobile responsive */
+/* MOBILE RESPONSIVE */
 @media (max-width: 768px) {
     .block-container {
         padding: 1rem;
@@ -1018,7 +1024,8 @@ hr {
         font-size: 2rem !important;
     }
 
-    .stButton > button {
+    .stButton > button,
+    .stDownloadButton > button {
         width: 100%;
     }
 }
