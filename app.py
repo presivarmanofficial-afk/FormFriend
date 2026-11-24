@@ -484,7 +484,7 @@ if uploaded_file is not None:
                         "Groq returned an empty response."
                     )
 
-            st.success("Analysis completed using Groq AI!")
+            st.success("Analysis completed.....!!")
 
             st.markdown(result)
 
@@ -504,7 +504,7 @@ if uploaded_file is not None:
                     raise Exception("Gemini API key is missing.")
 
                 with st.spinner(
-                    "Analysing your document using backup AI..."
+                    "Reanalysing your document"
                 ):
 
                     gemini_client = genai.Client(
