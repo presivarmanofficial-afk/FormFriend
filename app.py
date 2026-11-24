@@ -18,11 +18,30 @@ st.title("FormFriend 🤝")
 st.subheader("Your AI Application Guide")
 st.write("Upload a form and let AI explain it in simple language.")
 
-# Upload
-uploaded_file = st.file_uploader(
-    "Upload your form image",
-    type=["jpg", "jpeg", "png"]
+# Upload section
+st.subheader("📄 Upload Your Application Form")
+
+st.write("Choose a photo of your form from your phone or computer.")
+
+st.info(
+    "📱 Mobile users: Tap the image upload option and select "
+    "your form photo from Gallery, Photos, or your phone's picker."
 )
+
+# Select photo from gallery/files
+gallery_file = st.file_uploader(
+    "🖼️ Choose a photo from Gallery / Photos",
+    type=["jpg", "jpeg", "png"],
+    help="Select an existing photo of your application form."
+)
+
+# Take a photo directly using camera
+camera_file = st.camera_input(
+    "📷 Take a photo of your form"
+)
+
+# Choose whichever image the user provided
+uploaded_file = gallery_file if gallery_file is not None else camera_file
 
 # Prompt
 prompt = """
