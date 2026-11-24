@@ -77,7 +77,7 @@ if uploaded_file is not None:
             if not GEMINI_API_KEY:
                 raise Exception("Gemini API key is missing.")
 
-            st.info("Trying primary AI: Gemini...")
+            st.info("ANALYSING YOUR DOCUMENT.....")
 
             gemini_client = genai.Client(
                 api_key=GEMINI_API_KEY
@@ -94,15 +94,14 @@ if uploaded_file is not None:
                 ]
             )
 
-            st.success("Analysis completed using Gemini!")
+            st.success("Analysis completed!")
             st.markdown(response.text)
 
         # If Gemini fails, try Groq
         except Exception as gemini_error:
 
             st.warning(
-                "Gemini is unavailable. "
-                "Switching to backup AI (Groq)..."
+                "This may Take some time......Please wait "
             )
 
             try:
@@ -143,7 +142,7 @@ if uploaded_file is not None:
                     )
                 )
 
-                st.success("Analysis completed using Groq backup!")
+                st.success("Analysis completed....")
                 st.markdown(
                     groq_response.choices[0]
                     .message.content
@@ -151,7 +150,7 @@ if uploaded_file is not None:
 
             except Exception as groq_error:
 
-                st.error("Both AI services failed.")
+                st.error("Can't read your document at the movement Please try after some time.")
 
                 st.write("Gemini error:")
                 st.code(str(gemini_error))
