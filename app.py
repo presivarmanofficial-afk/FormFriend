@@ -52,6 +52,13 @@ LANGUAGES = {
     "Hindi": "hi-IN",
 }
 
+# language name -> name written in its own script (helps the AI stay on track)
+LANGUAGE_NATIVE = {
+    "English": "English",
+    "Tamil": "Tamil (தமிழ்)",
+    "Hindi": "Hindi (हिन्दी)",
+}
+
 
 # ==========================================
 # 2. SYSTEM PROMPT
@@ -409,17 +416,24 @@ main section.
 """
 
 
+def language_label(language):
+    """Language name with its own script, e.g. 'Tamil (தமிழ்)'."""
+    return LANGUAGE_NATIVE.get(language, language)
+
+
 def build_system_prompt(language):
     """System prompt + the language chosen in the sidebar."""
-    return SYSTEM_PROMPT + f"""
-
-## 15. SESSION LANGUAGE
-
-The user selected **{language}** in the app.
-Write your entire answer in {language}, and keep the official
-field names (in their original language) next to the translated
-meaning.
-"""
+    label = language_label(language)
+    # The language rule is placed BEFORE and AFTER the long prompt so
+    # the model cannot forget it or copy the language of the form.
+    rule = (
+        f"LANGUAGE RULE (highest priority): write the ENTIRE answer in "
+        f"{label} only. Do not use any other language, even if the form "
+        f"itself is written in another language such as Hindi or English. "
+        f"Official field names may stay in their original language inside "
+        f"brackets next to the {language} meaning."
+    )
+    return f"{rule}\n\n{SYSTEM_PROMPT}\n\n## 15. SESSION LANGUAGE\n\n{rule}\n"
 
 
 # ==========================================
@@ -896,7 +910,8 @@ if images:
     if st.button("✨ Understand My Form", type="primary"):
         request = (
             f"Please analyse the attached form ({len(images)} image(s)) "
-            f"and explain it in {language}, following your response format."
+            f"and explain it in {language_label(language)} only, "
+            "following your response format."
         )
         first_message = [{"role": "user", "content": request}]
 
@@ -932,6 +947,13 @@ if ss.result:
         st.info(
             "You changed the images. Click **Understand My Form** "
             "to analyse the new ones."
+        )
+
+    if ss.result_language != language:
+        st.info(
+            f"The answer below is in {ss.result_language}. To get it in "
+            f"{language}, click **Understand My Form** again. "
+            f"(Follow-up questions will already use {language}.)"
         )
 
     st.success("Analysis completed! ✅")
