@@ -1030,6 +1030,31 @@ hr {
     }
 }
 
+/* FORCE ALL BUTTON TEXT TO WHITE */
+
+.stButton button,
+.stButton button p,
+.stButton button span,
+.stDownloadButton button,
+.stDownloadButton button p,
+.stDownloadButton button span {
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
+    font-weight: 700 !important;
+}
+
+/* KEEP TEXT WHITE ON HOVER */
+.stButton button:hover,
+.stButton button:hover p,
+.stButton button:hover span,
+.stDownloadButton button:hover,
+.stDownloadButton button:hover p,
+.stDownloadButton button:hover span {
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
+}
+
+
 </style>
 """, unsafe_allow_html=True)
 
