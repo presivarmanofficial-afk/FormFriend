@@ -850,6 +850,7 @@ st.set_page_config(
 # FOR MFRIEND AI - NAVY BLUE & PASTEL PINK
 # ==========================================
 
+
 st.markdown("""
 <style>
 
@@ -903,6 +904,17 @@ p, label, li {
     box-shadow: 0 4px 10px rgba(23, 37, 84, 0.15);
 }
 
+/* WHITE TEXT INSIDE NAVY BLUE BUTTONS */
+.stButton button,
+.stButton button p,
+.stButton button span,
+.stDownloadButton button,
+.stDownloadButton button p,
+.stDownloadButton button span {
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
+}
+
 /* BUTTON HOVER */
 .stButton > button:hover,
 .stDownloadButton > button:hover {
@@ -910,6 +922,17 @@ p, label, li {
     border-color: #1E3A8A !important;
     transform: translateY(-2px);
     box-shadow: 0 6px 15px rgba(23, 37, 84, 0.22);
+}
+
+/* KEEP BUTTON TEXT WHITE ON HOVER */
+.stButton button:hover,
+.stButton button:hover p,
+.stButton button:hover span,
+.stDownloadButton button:hover,
+.stDownloadButton button:hover p,
+.stDownloadButton button:hover span {
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
 }
 
 /* BUTTON CLICK */
@@ -966,13 +989,17 @@ p, label, li {
     background: #FCE7F3;
     border-radius: 10px 10px 0 0;
     padding: 10px 16px;
-    color: #172554;
+    color: #172554 !important;
     font-weight: 600;
 }
 
-.stTabs [aria-selected="true"] {
+/* SELECTED NAVY BLUE TAB - WHITE TEXT */
+.stTabs [aria-selected="true"],
+.stTabs [aria-selected="true"] p,
+.stTabs [aria-selected="true"] span {
     background: #172554 !important;
     color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
 }
 
 /* ALERTS */
@@ -1030,34 +1057,8 @@ hr {
     }
 }
 
-/* FORCE ALL BUTTON TEXT TO WHITE */
-
-.stButton button,
-.stButton button p,
-.stButton button span,
-.stDownloadButton button,
-.stDownloadButton button p,
-.stDownloadButton button span {
-    color: #FFFFFF !important;
-    -webkit-text-fill-color: #FFFFFF !important;
-    font-weight: 700 !important;
-}
-
-/* KEEP TEXT WHITE ON HOVER */
-.stButton button:hover,
-.stButton button:hover p,
-.stButton button:hover span,
-.stDownloadButton button:hover,
-.stDownloadButton button:hover p,
-.stDownloadButton button:hover span {
-    color: #FFFFFF !important;
-    -webkit-text-fill-color: #FFFFFF !important;
-}
-
-
 </style>
 """, unsafe_allow_html=True)
-
 
 
 ss = st.session_state
