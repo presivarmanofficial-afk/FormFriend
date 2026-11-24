@@ -845,6 +845,186 @@ st.set_page_config(
     page_title="FormFriend",
     page_icon="🤝",
     layout="centered",
+    
+# ==========================================
+# MODERN PASTEL PINK UI THEME
+# ==========================================
+
+st.markdown("""
+<style>
+
+/* Import modern font */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+/* Main application */
+.stApp {
+    background: linear-gradient(135deg, #FFF1F5 0%, #FDF7FF 55%, #F5F3FF 100%);
+    color: #172554;
+    font-family: 'Inter', sans-serif;
+}
+
+/* Main content width */
+.block-container {
+    max-width: 1100px;
+    padding-top: 2.5rem;
+    padding-bottom: 3rem;
+}
+
+/* Main title */
+h1 {
+    color: #172554 !important;
+    font-weight: 800 !important;
+    letter-spacing: -1.5px;
+}
+
+/* Headings */
+h2, h3 {
+    color: #26345C !important;
+    font-weight: 700 !important;
+}
+
+/* Paragraphs */
+p, label, li {
+    color: #475569;
+}
+
+/* Sidebar */
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #F8C8DC 0%, #FCE7F3 100%);
+    border-right: 1px solid #F3B6D0;
+}
+
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {
+    color: #172554 !important;
+}
+
+/* Buttons */
+.stButton > button,
+.stDownloadButton > button {
+    background: linear-gradient(135deg, #2563EB, #7C3AED, #EC8FB5);
+    color: white !important;
+    border: none;
+    border-radius: 14px;
+    padding: 0.65rem 1.3rem;
+    font-weight: 700;
+    transition: all 0.25s ease;
+    box-shadow: 0 5px 15px rgba(124, 58, 237, 0.15);
+}
+
+.stButton > button:hover,
+.stDownloadButton > button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px rgba(124, 58, 237, 0.25);
+    border: none;
+}
+
+/* File uploader */
+[data-testid="stFileUploader"] {
+    background: rgba(255, 255, 255, 0.85);
+    border: 2px dashed #EC8FB5;
+    border-radius: 20px;
+    padding: 18px;
+}
+
+/* Cards and containers */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    background: rgba(255, 255, 255, 0.8);
+    border: 1px solid #F4C6D9;
+    border-radius: 18px;
+}
+
+/* Input fields */
+.stTextInput input,
+.stTextArea textarea,
+.stSelectbox div[data-baseweb="select"] {
+    border-radius: 12px !important;
+    border-color: #E9AFC8 !important;
+}
+
+/* Tabs */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 8px;
+    border-bottom: 2px solid #F4C6D9;
+}
+
+.stTabs [data-baseweb="tab"] {
+    background: #FCE7F3;
+    border-radius: 10px 10px 0 0;
+    padding: 10px 16px;
+    color: #475569;
+    font-weight: 600;
+}
+
+.stTabs [aria-selected="true"] {
+    background: #EC8FB5 !important;
+    color: white !important;
+}
+
+/* Alerts */
+[data-testid="stAlert"] {
+    border-radius: 14px;
+    border: 1px solid #F4C6D9;
+}
+
+/* Progress bar */
+.stProgress > div > div > div > div {
+    background: linear-gradient(90deg, #2563EB, #7C3AED, #EC8FB5);
+}
+
+/* Images */
+[data-testid="stImage"] img {
+    border-radius: 16px;
+    border: 2px solid #F4C6D9;
+}
+
+/* Checkboxes */
+[data-testid="stCheckbox"] {
+    padding: 5px;
+}
+
+/* Chat messages */
+[data-testid="stChatMessage"] {
+    background: rgba(255, 255, 255, 0.85);
+    border: 1px solid #F4C6D9;
+    border-radius: 16px;
+    padding: 12px;
+}
+
+/* Chat input */
+[data-testid="stChatInput"] {
+    border-radius: 16px;
+}
+
+/* Divider */
+hr {
+    border-color: #F4C6D9 !important;
+}
+
+/* Footer */
+[data-testid="stCaptionContainer"] {
+    color: #64748B;
+}
+
+/* Mobile responsive */
+@media (max-width: 768px) {
+    .block-container {
+        padding: 1rem;
+    }
+
+    h1 {
+        font-size: 2rem !important;
+    }
+
+    .stButton > button {
+        width: 100%;
+    }
+}
+
+</style>
+""", unsafe_allow_html=True)
+
 )
 
 ss = st.session_state
