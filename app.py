@@ -763,6 +763,37 @@ official website.</small></p>
 </html>"""
 
 
+def open_gallery_on_mobile():
+    """
+    Streamlit limits uploads with file extensions (.jpg, .png), which makes
+    Android open the file manager. Setting accept="image/*" on the upload
+    input makes phones open the photo gallery / photo picker instead.
+    """
+    components.html(
+        """
+        <script>
+          try {
+            const fix = () => {
+              window.parent.document
+                .querySelectorAll('input[type="file"]')
+                .forEach((input) => {
+                  if (input.accept !== "image/*") {
+                    input.accept = "image/*";
+                  }
+                });
+            };
+            fix();
+            new MutationObserver(fix).observe(
+              window.parent.document.body,
+              { childList: true, subtree: true }
+            );
+          } catch (e) {}
+        </script>
+        """,
+        height=0,
+    )
+
+
 def show_errors(errors, debug):
     st.error(
         "😕 Can't read your document at the moment. "
@@ -855,6 +886,8 @@ gallery_files = st.file_uploader(
     key=f"gallery_{ss.uploader_version}",
     help="Select existing photos of your application form.",
 )
+
+open_gallery_on_mobile()
 
 camera_file = None
 if st.checkbox("📷 Take a photo with the camera", key=f"cam_{ss.uploader_version}"):
