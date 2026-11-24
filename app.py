@@ -845,6 +845,7 @@ st.set_page_config(
     page_title="FormFriend",
     page_icon="🤝",
     layout="centered",
+)
     
 # ==========================================
 # MODERN PASTEL PINK UI THEME
@@ -1025,7 +1026,7 @@ hr {
 </style>
 """, unsafe_allow_html=True)
 
-)
+
 
 ss = st.session_state
 
