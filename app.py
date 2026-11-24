@@ -558,18 +558,161 @@ def show_image(img_bytes, caption):
 
 
 # ==========================================
-# 4. AI HELPERS (Groq first, Gemini backup)
+# 4. DAILY USAGE COUNTER + AI HELPERS (Groq first, Gemini backup)
 # ==========================================
 
-class AIError(Exception):
-    """Raised when every API attempt failed."""
+IST = timezone(timedelta(hours=5, minutes=30))
+PROVIDERS = ("Groq", "Gemini")
 
-    def __init__(self, errors):
-        super().__init__("; ".join(errors))
+
+class UsageTracker:
+    """Counts today's analyses for each provider. Shared by every visitor."""
+
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.day = self._today()
+        self.counts = {name: 0 for name in PROVIDERS}
+        self._load()
+
+    @staticmethod
+    def _today():
+        return datetime.now(IST).strftime("%Y-%m-%d")
+
+    def _load(self):
+        try:
+            with open(self.path, encoding="utf-8") as file:
+                data = json.load(file)
+            if data.get("day") == self.day:
+                saved = data.get("counts", {})
+                for name in PROVIDERS:
+                    self.counts[name] = int(saved.get(name, 0))
+        except Exception:
+            pass  # no file yet (or unreadable): start from zero
+
+    def _save(self):
+        try:
+            with open(self.path, "w", encoding="utf-8") as file:
+                json.dump({"day": self.day, "counts": self.counts}, file)
+        except Exception:
+            pass  # saving is a bonus, the in-memory counter still works
+
+    def _roll_over(self):
+        today = self._today()
+        if today != self.day:  # a new day started: reset the counters
+            self.day = today
+            self.counts = {name: 0 for name in PROVIDERS}
+
+    def snapshot(self):
+        with self.lock:
+            self._roll_over()
+            return dict(self.counts)
+
+    def add(self, provider):
+        with self.lock:
+            self._roll_over()
+            if provider in self.counts:
+                self.counts[provider] += 1
+                self._save()
+
+
+@st.cache_resource
+def get_usage_tracker():
+    return UsageTracker(USAGE_FILE)
+
+
+def configured_providers():
+    keys = {"Groq": GROQ_API_KEY, "Gemini": GEMINI_API_KEY}
+    return [name for name in PROVIDERS if keys[name]]
+
+
+def usage_summary():
+    """Numbers for the sidebar: used / capacity / left for today."""
+    counts = get_usage_tracker().snapshot()
+    names = configured_providers()
+    used = sum(min(counts[name], DAILY_LIMIT) for name in names)
+    capacity = DAILY_LIMIT * len(names)
+    return {
+        "used": used,
+        "capacity": capacity,
+        "left": capacity - used,
+        "counts": counts,
+    }
+
+
+class AIError(Exception):
+    """Raised when no answer could be produced."""
+
+    def __init__(self, errors, rate_limited=False, daily_limit=False):
+        super().__init__("; ".join(errors) or "AI error")
         self.errors = errors
+        self.rate_limited = rate_limited  # the AI service said "too many requests"
+        self.daily_limit = daily_limit    # our own daily counter is used up
+
+
+def is_rate_limit(error):
+    """True when an API error means 'too many requests / quota used up'."""
+    code = getattr(error, "status_code", None) or getattr(error, "code", None)
+    if code == 429:
+        return True
+    text = str(error).lower()
+    return any(
+        word in text
+        for word in ("429", "rate limit", "rate_limit", "resource_exhausted", "quota")
+    )
+
+
+class ThinkFilter:
+    """Removes <think>...</think> blocks from streamed text, on the fly."""
+
+    OPEN = "<think>"
+    CLOSE = "</think>"
+
+    def __init__(self):
+        self.buffer = ""
+        self.in_think = False
+        self.started = False
+
+    def feed(self, text):
+        self.buffer += text
+        out = []
+        while True:
+            if self.in_think:
+                end = self.buffer.find(self.CLOSE)
+                if end == -1:
+                    # keep only a possible half-written closing tag
+                    self.buffer = self.buffer[-(len(self.CLOSE) - 1):]
+                    break
+                self.buffer = self.buffer[end + len(self.CLOSE):]
+                self.in_think = False
+            else:
+                start = self.buffer.find(self.OPEN)
+                if start == -1:
+                    keep = len(self.OPEN) - 1  # maybe a half-written <think>
+                    if len(self.buffer) > keep:
+                        out.append(self.buffer[:-keep])
+                        self.buffer = self.buffer[-keep:]
+                    break
+                out.append(self.buffer[:start])
+                self.buffer = self.buffer[start + len(self.OPEN):]
+                self.in_think = True
+        return self._clean("".join(out))
+
+    def flush(self):
+        rest = "" if self.in_think else self.buffer
+        self.buffer = ""
+        return self._clean(rest)
+
+    def _clean(self, text):
+        if not self.started:
+            text = text.lstrip()
+            if text:
+                self.started = True
+        return text
 
 
 def call_groq(system_prompt, history, images):
+    """Yields the answer piece by piece."""
     client = Groq(
         api_key=GROQ_API_KEY,
         timeout=REQUEST_TIMEOUT,
@@ -596,14 +739,21 @@ def call_groq(system_prompt, history, images):
                 {"role": message["role"], "content": message["content"]}
             )
 
-    response = client.chat.completions.create(
+    stream = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=messages,
+        stream=True,
     )
-    return response.choices[0].message.content
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+        piece = chunk.choices[0].delta.content
+        if piece:
+            yield piece
 
 
 def call_gemini(system_prompt, history, images):
+    """Yields the answer piece by piece."""
     client = genai.Client(
         api_key=GEMINI_API_KEY,
         http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT * 1000),
@@ -622,44 +772,90 @@ def call_gemini(system_prompt, history, images):
 
         contents.append(types.Content(role=role, parts=parts))
 
-    response = client.models.generate_content(
+    stream = client.models.generate_content_stream(
         model=GEMINI_MODEL,
         contents=contents,
         config=types.GenerateContentConfig(system_instruction=system_prompt),
     )
-    return response.text
+    for chunk in stream:
+        try:
+            piece = chunk.text
+        except Exception:
+            piece = None
+        if piece:
+            yield piece
 
 
-def ask_ai(system_prompt, history, images=None):
+def stream_ai(system_prompt, history, images=None, info=None, check_limit=False):
     """
-    Try Groq, then Gemini. Each gets 1 + RETRIES attempts.
-    Returns (text, provider_name). Raises AIError if everything fails.
-    """
-    providers = []
-    if GROQ_API_KEY:
-        providers.append(("Groq", call_groq))
-    if GEMINI_API_KEY:
-        providers.append(("Gemini", call_gemini))
+    Generator: tries Groq, then Gemini, and yields the answer piece by piece.
 
+    info (a dict you pass in) is filled with:
+      info["provider"] - who is answering
+      info["partial"]  - True if the answer broke off half way
+
+    check_limit=True skips a provider whose daily limit is already used up.
+    Raises AIError if nothing could be produced.
+    """
+    info = info if info is not None else {}
+    functions = {"Groq": call_groq, "Gemini": call_gemini}
+
+    providers = configured_providers()
     if not providers:
         raise AIError(["No API keys found. Add them to your .env file."])
 
-    errors = []
-    for name, function in providers:
-        for attempt in range(1, RETRIES + 2):
-            try:
-                text = function(system_prompt, history, images or [])
-                # some reasoning models add <think>...</think> blocks
-                text = re.sub(
-                    r"<think>.*?</think>", "", text or "", flags=re.DOTALL
-                ).strip()
-                if not text:
-                    raise RuntimeError("Empty response.")
-                return text, name
-            except Exception as error:
-                errors.append(f"{name} (attempt {attempt}): {error}")
+    if check_limit:
+        counts = get_usage_tracker().snapshot()
+        providers = [name for name in providers if counts[name] < DAILY_LIMIT]
+        if not providers:
+            raise AIError([], daily_limit=True)
 
-    raise AIError(errors)
+    errors = []
+    rate_limited = []
+
+    for name in providers:
+        for attempt in range(1, RETRIES + 2):
+            started = False
+            try:
+                think_filter = ThinkFilter()
+                for piece in functions[name](system_prompt, history, images or []):
+                    visible = think_filter.feed(piece)
+                    if visible:
+                        started = True
+                        info["provider"] = name
+                        yield visible
+                visible = think_filter.flush()
+                if visible:
+                    started = True
+                    info["provider"] = name
+                    yield visible
+                if started:
+                    return
+                raise RuntimeError("Empty response.")
+            except Exception as error:
+                if started:
+                    # Already showed part of the answer, cannot switch now.
+                    info["partial"] = True
+                    leftover = think_filter.flush()
+                    if leftover:
+                        yield leftover
+                    return
+                errors.append(f"{name} (attempt {attempt}): {error}")
+                if is_rate_limit(error):
+                    rate_limited.append(name)
+                    break  # retrying the same service will not help
+
+    raise AIError(
+        errors,
+        rate_limited=bool(rate_limited) and len(rate_limited) == len(providers),
+    )
+
+
+def ask_ai(system_prompt, history, images=None):
+    """Same as stream_ai, but waits and returns (text, provider)."""
+    info = {}
+    text = "".join(stream_ai(system_prompt, history, images, info)).strip()
+    return text, info.get("provider")
 
 
 def extract_documents(analysis_text, language):
@@ -826,19 +1022,225 @@ def open_gallery_on_mobile():
     )
 
 
-def show_errors(errors, debug):
-    st.error(
-        "😕 Can't read your document at the moment. "
-        "Please try again in a little while."
-    )
-    if debug:
+DAILY_LIMIT_MESSAGE = (
+    "🌙 Today's free limit of FormFriend is over. Please come back "
+    "tomorrow. Thank you for your patience! 💙"
+)
+BUSY_MESSAGE = (
+    "🚦 FormFriend is very busy right now because many people are using it. "
+    "Please wait about a minute and try again."
+)
+
+
+def show_errors(error, debug):
+    """Friendly message for normal users, technical details only in debug."""
+    if error.daily_limit:
+        st.warning(DAILY_LIMIT_MESSAGE)
+    elif error.rate_limited:
+        st.warning(BUSY_MESSAGE)
+    else:
+        st.error(
+            "😕 Can't read your document at the moment. "
+            "Please try again in a little while."
+        )
+    if debug and error.errors:
         with st.expander("Technical error details"):
-            for line in errors:
+            for line in error.errors:
                 st.code(line)
 
 
+def show_stream(generator):
+    """Show the answer word by word while it is being written."""
+    placeholder = st.empty()
+    text = ""
+    last_draw = 0.0
+    for piece in generator:
+        text += piece
+        now = time.monotonic()
+        if now - last_draw > 0.06:  # do not redraw on every tiny piece
+            placeholder.markdown(text + " ▌")
+            last_draw = now
+    placeholder.markdown(text)
+    return text
+
+
+def admin_requested():
+    """Admin login is only shown when the page is opened with ?admin=1"""
+    try:
+        return "admin" in st.query_params
+    except Exception:
+        return False
+
+
 # ==========================================
-# 6. PAGE SETUP + SESSION STATE
+# 6. DESIGN (navy blue + pastel pink)
+# Change these colours to restyle the whole app.
+# ==========================================
+
+NAVY = "#0B1F4B"        # header, headings, main buttons
+ROYAL = "#1E3A8A"       # lighter royal blue
+PINK = "#F8C8DC"        # pastel pink (fills, badges, soft accents)
+PINK_DEEP = "#E58FB0"   # deeper pink for thin lines and hover borders
+PAGE_BG = "#F4F7FC"     # calm light page background
+CARD_BORDER = "#DCE4F3"
+
+CSS = """
+<style>
+.stApp { background: __PAGE_BG__; }
+.block-container { padding-top: 1.2rem; padding-bottom: 3rem; max-width: 820px; }
+footer { visibility: hidden; }
+h2, h3, h4 { color: __NAVY__; }
+[data-testid="stSidebar"] { border-right: 1px solid __CARD_BORDER__; }
+
+/* ---------- hero banner ---------- */
+.ff-hero {
+  background: linear-gradient(135deg, __NAVY__ 0%, __ROYAL__ 100%);
+  border-radius: 18px;
+  padding: 28px 26px 22px;
+  margin-bottom: 18px;
+  color: #fff;
+  border-bottom: 5px solid __PINK__;
+  box-shadow: 0 10px 26px rgba(11, 31, 75, 0.25);
+}
+.ff-badge {
+  display: inline-block;
+  background: __PINK__;
+  color: __NAVY__;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.ff-title {
+  font-size: 2.3rem;
+  font-weight: 800;
+  line-height: 1.15;
+  margin: 12px 0 6px;
+  color: #fff;
+}
+.ff-tagline { font-size: 1.02rem; color: #D9E3F7; margin: 0 0 16px; }
+.ff-steps { display: flex; flex-wrap: wrap; gap: 8px; }
+.ff-step {
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(255, 255, 255, 0.20);
+  border-radius: 10px;
+  padding: 6px 12px 6px 8px;
+  font-size: 0.88rem;
+  color: #fff;
+}
+.ff-step b {
+  display: inline-block;
+  background: __PINK__;
+  color: __NAVY__;
+  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  line-height: 22px;
+  text-align: center;
+  margin-right: 7px;
+  font-size: 0.8rem;
+}
+
+/* ---------- buttons ---------- */
+.stButton > button, .stDownloadButton > button {
+  border-radius: 10px;
+  border: 1px solid __ROYAL__;
+  color: __NAVY__;
+  font-weight: 600;
+  transition: all 0.15s ease;
+}
+.stButton > button:hover, .stDownloadButton > button:hover {
+  background: __PINK__;
+  border-color: __PINK_DEEP__;
+  color: __NAVY__;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(30, 58, 138, 0.15);
+}
+.stButton > button[kind="primary"],
+.stButton > button[data-testid="stBaseButton-primary"] {
+  background: linear-gradient(135deg, __NAVY__, __ROYAL__);
+  border: none;
+  border-bottom: 3px solid __PINK__;
+  padding: 0.6rem 1rem;
+}
+.stButton > button[kind="primary"] p,
+.stButton > button[data-testid="stBaseButton-primary"] p { color: #fff; }
+.stButton > button[kind="primary"]:hover,
+.stButton > button[data-testid="stBaseButton-primary"]:hover {
+  background: linear-gradient(135deg, __ROYAL__, __NAVY__);
+  border-bottom: 3px solid __PINK_DEEP__;
+}
+
+/* ---------- cards and widgets ---------- */
+[data-testid="stFileUploader"] section {
+  background: #fff;
+  border: 2px dashed __ROYAL__;
+  border-radius: 14px;
+}
+[data-testid="stImage"] img {
+  border-radius: 12px;
+  box-shadow: 0 4px 14px rgba(11, 31, 75, 0.15);
+}
+[data-testid="stAlert"] { border-radius: 12px; }
+[data-testid="stChatMessage"] {
+  background: #fff;
+  border: 1px solid __CARD_BORDER__;
+  border-radius: 14px;
+}
+.stTabs [data-baseweb="tab-list"] { gap: 2px; flex-wrap: wrap; }
+.stTabs [aria-selected="true"] { color: __NAVY__; font-weight: 700; }
+.stTabs [data-baseweb="tab-highlight"] { background-color: __PINK_DEEP__; }
+.stTabs [data-baseweb="tab-panel"] {
+  background: #fff;
+  border: 1px solid __CARD_BORDER__;
+  border-radius: 0 0 14px 14px;
+  padding: 16px 18px;
+}
+
+/* ---------- phones ---------- */
+@media (max-width: 640px) {
+  .ff-hero { padding: 20px 16px 16px; }
+  .ff-title { font-size: 1.75rem; }
+  .ff-tagline { font-size: 0.95rem; }
+}
+</style>
+"""
+
+
+def inject_css():
+    css = CSS
+    for token, value in {
+        "__NAVY__": NAVY,
+        "__ROYAL__": ROYAL,
+        "__PINK__": PINK,
+        "__PINK_DEEP__": PINK_DEEP,
+        "__PAGE_BG__": PAGE_BG,
+        "__CARD_BORDER__": CARD_BORDER,
+    }.items():
+        css = css.replace(token, value)
+    st.markdown(css, unsafe_allow_html=True)
+
+
+def render_hero():
+    st.markdown(
+        '<div class="ff-hero">'
+        '<span class="ff-badge">AI Application Guide</span>'
+        '<div class="ff-title">FormFriend 🤝</div>'
+        '<p class="ff-tagline">Upload any application form and get a clear, '
+        "step-by-step explanation in English, Tamil or Hindi.</p>"
+        '<div class="ff-steps">'
+        '<span class="ff-step"><b>1</b>Upload your form</span>'
+        '<span class="ff-step"><b>2</b>Get it explained</span>'
+        '<span class="ff-step"><b>3</b>Ask questions</span>'
+        "</div></div>",
+        unsafe_allow_html=True,
+    )
+
+
+# ==========================================
+# 7. PAGE SETUP + SESSION STATE
 # ==========================================
 
 st.set_page_config(
@@ -846,220 +1248,7 @@ st.set_page_config(
     page_icon="🤝",
     layout="centered",
 )
-# ==========================================
-# FOR MFRIEND AI - NAVY BLUE & PASTEL PINK
-# ==========================================
-
-
-st.markdown("""
-<style>
-
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-
-/* MAIN BACKGROUND */
-.stApp {
-    background: #FFF1F5;
-    color: #172554;
-    font-family: 'Inter', sans-serif;
-}
-
-.block-container {
-    max-width: 1100px;
-    padding-top: 2rem;
-    padding-bottom: 3rem;
-}
-
-/* HEADINGS */
-h1, h2, h3 {
-    color: #172554 !important;
-    font-weight: 700 !important;
-}
-
-p, label, li {
-    color: #475569;
-}
-
-/* SIDEBAR */
-[data-testid="stSidebar"] {
-    background: #F8C8DC;
-    border-right: 1px solid #F4C6D9;
-}
-
-[data-testid="stSidebar"] h1,
-[data-testid="stSidebar"] h2,
-[data-testid="stSidebar"] h3 {
-    color: #172554 !important;
-}
-
-/* NAVY BLUE BUTTONS */
-.stButton > button,
-.stDownloadButton > button {
-    background: #172554 !important;
-    color: #FFFFFF !important;
-    border: 1px solid #172554 !important;
-    border-radius: 12px !important;
-    padding: 0.65rem 1.3rem !important;
-    font-weight: 600 !important;
-    transition: all 0.25s ease !important;
-    box-shadow: 0 4px 10px rgba(23, 37, 84, 0.15);
-}
-
-/* WHITE TEXT INSIDE NAVY BLUE BUTTONS */
-.stButton button,
-.stButton button p,
-.stButton button span,
-.stDownloadButton button,
-.stDownloadButton button p,
-.stDownloadButton button span {
-    color: #FFFFFF !important;
-    -webkit-text-fill-color: #FFFFFF !important;
-}
-
-/* BUTTON HOVER */
-.stButton > button:hover,
-.stDownloadButton > button:hover {
-    background: #1E3A8A !important;
-    border-color: #1E3A8A !important;
-    transform: translateY(-2px);
-    box-shadow: 0 6px 15px rgba(23, 37, 84, 0.22);
-}
-
-/* KEEP BUTTON TEXT WHITE ON HOVER */
-.stButton button:hover,
-.stButton button:hover p,
-.stButton button:hover span,
-.stDownloadButton button:hover,
-.stDownloadButton button:hover p,
-.stDownloadButton button:hover span {
-    color: #FFFFFF !important;
-    -webkit-text-fill-color: #FFFFFF !important;
-}
-
-/* BUTTON CLICK */
-.stButton > button:active,
-.stDownloadButton > button:active {
-    transform: scale(0.98);
-}
-
-/* DISABLED BUTTON */
-.stButton > button:disabled,
-.stDownloadButton > button:disabled {
-    background: #94A3B8 !important;
-    border-color: #94A3B8 !important;
-    color: #FFFFFF !important;
-    box-shadow: none;
-}
-
-/* FILE UPLOADER */
-[data-testid="stFileUploader"] {
-    background: #FFFFFF;
-    border: 2px dashed #EC8FB5;
-    border-radius: 18px;
-    padding: 15px;
-}
-
-/* INPUT FIELDS */
-.stTextInput input,
-.stTextArea textarea {
-    background: #FFFFFF !important;
-    border: 1px solid #E9AFC8 !important;
-    border-radius: 10px !important;
-    color: #172554 !important;
-}
-
-/* SELECT BOX */
-.stSelectbox div[data-baseweb="select"] {
-    border-radius: 10px !important;
-}
-
-/* CARDS */
-[data-testid="stVerticalBlockBorderWrapper"] {
-    background: #FFFFFF;
-    border: 1px solid #F4C6D9;
-    border-radius: 16px;
-}
-
-/* TABS */
-.stTabs [data-baseweb="tab-list"] {
-    gap: 8px;
-    border-bottom: 2px solid #F4C6D9;
-}
-
-.stTabs [data-baseweb="tab"] {
-    background: #FCE7F3;
-    border-radius: 10px 10px 0 0;
-    padding: 10px 16px;
-    color: #172554 !important;
-    font-weight: 600;
-}
-
-/* SELECTED NAVY BLUE TAB - WHITE TEXT */
-.stTabs [aria-selected="true"],
-.stTabs [aria-selected="true"] p,
-.stTabs [aria-selected="true"] span {
-    background: #172554 !important;
-    color: #FFFFFF !important;
-    -webkit-text-fill-color: #FFFFFF !important;
-}
-
-/* ALERTS */
-[data-testid="stAlert"] {
-    border-radius: 12px;
-}
-
-/* PROGRESS BAR */
-.stProgress > div > div > div > div {
-    background: #172554;
-}
-
-/* CHAT MESSAGES */
-[data-testid="stChatMessage"] {
-    background: #FFFFFF;
-    border: 1px solid #F4C6D9;
-    border-radius: 14px;
-    padding: 12px;
-}
-
-/* CHAT INPUT */
-[data-testid="stChatInput"] {
-    border-radius: 12px;
-}
-
-/* IMAGES */
-[data-testid="stImage"] img {
-    border-radius: 14px;
-    border: 1px solid #F4C6D9;
-}
-
-/* DIVIDER */
-hr {
-    border-color: #F4C6D9 !important;
-}
-
-/* CAPTIONS */
-[data-testid="stCaptionContainer"] {
-    color: #64748B;
-}
-
-/* MOBILE RESPONSIVE */
-@media (max-width: 768px) {
-    .block-container {
-        padding: 1rem;
-    }
-
-    h1 {
-        font-size: 2rem !important;
-    }
-
-    .stButton > button,
-    .stDownloadButton > button {
-        width: 100%;
-    }
-}
-
-</style>
-""", unsafe_allow_html=True)
-
+inject_css()
 
 ss = st.session_state
 
@@ -1067,6 +1256,7 @@ DEFAULT_STATE = {
     "result": None,           # the main analysis text
     "result_language": "English",
     "provider": None,         # which AI answered
+    "partial": False,         # True if the answer broke off half way
     "history": [],            # whole conversation (for follow-ups)
     "analysis_images": [],    # images the analysis was based on
     "fingerprint": None,      # id of those images
@@ -1086,14 +1276,30 @@ def reset_all():
 
 
 # ==========================================
-# 7. SIDEBAR
+# 8. SIDEBAR
 # ==========================================
+
+is_admin = False
+debug = False
 
 with st.sidebar:
     st.header("⚙️ Settings")
     language = st.selectbox("🌐 Language", list(LANGUAGES))
-    debug = st.checkbox("🛠️ Debug mode", help="Shows technical error details.")
     st.button("🔄 Start over", on_click=reset_all)
+
+    # ---- daily usage counter ----
+    usage = usage_summary()
+    st.divider()
+    st.subheader("📊 Today's usage")
+    if usage["capacity"]:
+        st.progress(
+            min(usage["used"] / usage["capacity"], 1.0),
+            text=f"{usage['used']} of {usage['capacity']} free analyses used",
+        )
+        if usage["left"] > 0:
+            st.caption(f"✅ {usage['left']} analyses left today")
+        else:
+            st.caption("🌙 Limit reached. Please come back tomorrow.")
 
     st.divider()
     st.subheader("How to use")
@@ -1105,14 +1311,33 @@ with st.sidebar:
         "5. Ask follow-up questions below the answer"
     )
 
+    # ---- admin area (hidden unless the URL has ?admin=1) ----
+    if ADMIN_PASSWORD and admin_requested():
+        st.divider()
+        with st.expander("🔐 Admin"):
+            password = st.text_input("Admin password", type="password")
+            if password:
+                if hmac.compare_digest(
+                    password.encode("utf-8"), ADMIN_PASSWORD.encode("utf-8")
+                ):
+                    is_admin = True
+                else:
+                    st.error("Wrong password.")
+            if is_admin:
+                debug = st.checkbox(
+                    "🛠️ Debug mode", help="Shows technical error details."
+                )
+                for name in configured_providers():
+                    st.caption(
+                        f"{name}: {usage['counts'][name]} / {DAILY_LIMIT} today"
+                    )
+
 
 # ==========================================
-# 8. HEADER + UPLOAD SECTION
+# 9. HEADER + UPLOAD SECTION
 # ==========================================
 
-st.title("FormFriend 🤝")
-st.subheader("Your AI Application Guide")
-st.write("Upload a form and let AI explain it in simple language.")
+render_hero()
 
 st.info(
     "🔒 Privacy tip: only upload what is needed. Avoid photos that show "
@@ -1172,7 +1397,7 @@ current_fingerprint = (
 
 
 # ==========================================
-# 9. PREVIEW + ANALYSE
+# 10. PREVIEW + ANALYSE (answer appears word by word)
 # ==========================================
 
 if images:
@@ -1193,12 +1418,27 @@ if images:
             "following your response format."
         )
         first_message = [{"role": "user", "content": request}]
+        info = {}
 
         try:
-            with st.spinner("Analysing your form with FormFriend AI... ⏳"):
-                text, provider = ask_ai(
-                    build_system_prompt(language), first_message, images
+            st.markdown("##### ✍️ Writing your guide...")
+            text = show_stream(
+                stream_ai(
+                    build_system_prompt(language),
+                    first_message,
+                    images,
+                    info,
+                    check_limit=True,  # respects the daily counter
                 )
+            ).strip()
+
+            if not text:
+                raise AIError(["Empty response."])
+
+            provider = info.get("provider")
+            get_usage_tracker().add(provider)  # count this analysis
+
+            with st.spinner("Preparing your document checklist... 📋"):
                 docs = extract_documents(text, language)
 
             ss.history = first_message + [
@@ -1207,16 +1447,18 @@ if images:
             ss.result = text
             ss.result_language = language
             ss.provider = provider
+            ss.partial = bool(info.get("partial"))
             ss.analysis_images = images
             ss.fingerprint = current_fingerprint
             ss.docs = docs
+            st.rerun()  # show the final tabs + updated counter
 
         except AIError as error:
-            show_errors(error.errors, debug)
+            show_errors(error, debug)
 
 
 # ==========================================
-# 10. RESULT, TOOLS AND FOLLOW-UP CHAT
+# 11. RESULT, TOOLS AND FOLLOW-UP CHAT
 # ==========================================
 
 if ss.result:
@@ -1236,7 +1478,13 @@ if ss.result:
         )
 
     st.success("Analysis completed! ✅")
-    st.caption(f"Answered by {ss.provider}")
+    if ss.partial:
+        st.warning(
+            "The answer may be cut short. Click **Understand My Form** "
+            "again if something looks missing."
+        )
+    if is_admin:
+        st.caption(f"Answered by {ss.provider}")
 
     render_result(ss.result)
 
@@ -1279,6 +1527,14 @@ if ss.result:
 
     # ---- Follow-up chat ----
     st.subheader("💬 Ask a follow-up question")
+    include_image = st.checkbox(
+        "📎 Include the form image with my question",
+        help=(
+            "Normally the image is NOT sent again, which saves your free "
+            "daily limit. Tick this only if the answer needs the image."
+        ),
+    )
+
     for message in ss.history[2:]:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
@@ -1286,24 +1542,31 @@ if ss.result:
     question = st.chat_input("Ask anything about this form...")
     if question:
         ss.history.append({"role": "user", "content": question})
-        try:
-            with st.spinner("Thinking... 🤔"):
-                answer, provider = ask_ai(
-                    build_system_prompt(language),
-                    ss.history,
-                    ss.analysis_images,
-                )
-            ss.history.append({"role": "assistant", "content": answer})
-            ss.provider = provider
-        except AIError as error:
-            ss.history.pop()  # remove the question that got no answer
-            show_errors(error.errors, debug)
-        else:
-            st.rerun()
+        with st.chat_message("user"):
+            st.markdown(question)
+
+        with st.chat_message("assistant"):
+            try:
+                info = {}
+                answer = show_stream(
+                    stream_ai(
+                        build_system_prompt(language, image_attached=include_image),
+                        ss.history,
+                        ss.analysis_images if include_image else [],
+                        info,
+                    )
+                ).strip()
+                if not answer:
+                    raise AIError(["Empty response."])
+                ss.history.append({"role": "assistant", "content": answer})
+                ss.provider = info.get("provider", ss.provider)
+            except AIError as error:
+                ss.history.pop()  # remove the question that got no answer
+                show_errors(error, debug)
 
 
 # ==========================================
-# 11. FOOTER
+# 12. FOOTER
 # ==========================================
 
 st.divider()
