@@ -9,10 +9,14 @@ Run with:   streamlit run app.py
 
 import base64
 import hashlib
+import hmac
 import io
 import json
 import os
 import re
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from html import escape
 
 import streamlit as st
@@ -44,6 +48,23 @@ MAX_IMAGE_SIDE = 1600   # pixels - bigger photos are shrunk before sending
 REQUEST_TIMEOUT = 60    # seconds to wait for one AI call
 RETRIES = 1             # extra tries on the same API before switching
 BLUR_THRESHOLD = 100    # lower = more sensitive blur warning (rough check)
+
+
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+# Planned free analyses per day, for EACH api key (Groq and Gemini).
+# Change it in your .env / Streamlit secrets with DAILY_LIMIT=...
+DAILY_LIMIT = _env_int("DAILY_LIMIT", 35)
+USAGE_FILE = os.getenv("USAGE_FILE", "usage_counter.json")
+
+# Secret password that unlocks Debug mode (open the app with ?admin=1).
+# If it is not set, Debug mode is hidden from everyone.
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 
 # language name -> browser speech code (used for "Read aloud")
 LANGUAGES = {
@@ -421,7 +442,7 @@ def language_label(language):
     return LANGUAGE_NATIVE.get(language, language)
 
 
-def build_system_prompt(language):
+def build_system_prompt(language, image_attached=True):
     """System prompt + the language chosen in the sidebar."""
     label = language_label(language)
     # The language rule is placed BEFORE and AFTER the long prompt so
@@ -433,7 +454,18 @@ def build_system_prompt(language):
         f"Official field names may stay in their original language inside "
         f"brackets next to the {language} meaning."
     )
-    return f"{rule}\n\n{SYSTEM_PROMPT}\n\n## 15. SESSION LANGUAGE\n\n{rule}\n"
+    prompt = f"{rule}\n\n{SYSTEM_PROMPT}\n\n## 15. SESSION LANGUAGE\n\n{rule}\n"
+
+    if not image_attached:
+        prompt += (
+            "\n## 16. FOLLOW-UP QUESTIONS\n\n"
+            "The form image is NOT attached again, to save resources. "
+            "Answer from your earlier analysis in this conversation. "
+            "If the question needs details you cannot find there, say so "
+            "and ask the user to tick 'Include the form image with my "
+            "question' and ask again. Keep the answer short and direct.\n"
+        )
+    return prompt
 
 
 # ==========================================
